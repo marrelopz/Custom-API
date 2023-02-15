@@ -1,0 +1,450 @@
+<?php
+
+/**
+ * @author Maria Lopez <marrelopz@gmail.com>
+ */
+
+/**
+ *  Devuelve la informacion de la cuenta del usuario
+ * @return \WP_REST_Response
+ */
+function wp_get_accountInfo() {
+    return new WP_REST_Response([
+        "tarjetas" => 10,
+    ]);
+}
+
+/**
+ * Devuelve el nombre de todas las listas o la informacion de una lista en especifico
+ * @param type $request
+ * @return type
+ */
+function wp_get_listas($request) {
+    global $wpdb;
+    $customer_id = get_user();	
+	
+	$id_listas = $wpdb->get_results($wpdb->prepare("select post_id from wp_postmeta where meta_key ='_wishlist_owner' and meta_value = %d", $customer_id));
+    $listas = [];
+    foreach ($id_listas as $id) {
+
+        $wishlist = $wpdb->get_results($wpdb->prepare("SELECT post_title,post_date from wp_posts where id =%d", $id->post_id));
+        $title = $wishlist[0]->post_title;
+        $date = $wishlist[0]->post_date;
+        $sharing = $wpdb->get_var($wpdb->prepare("SELECT meta_value from wp_postmeta where post_id=%d and meta_key='_wishlist_sharing'", $id->post_id));
+        $lista = array("id" => $id->post_id,
+            "title" => $title,
+            "date" => $date,
+            "sharing" => $sharing);
+        $listas[] = $lista;
+    }
+	
+    return $listas;
+}
+
+function wp_get_lista($request) {
+    global $wpdb;
+    $user = get_user();
+    $id = filter_var($request['id'], FILTER_SANITIZE_NUMBER_INT);
+    $items = $wpdb->get_var($wpdb->prepare("SELECT meta_value from wp_postmeta where post_id=%d and meta_key='_wishlist_items'", $id));
+    $items = unserialize($items);
+    $productos = [];
+    $WC = new WC_Product_Factory();
+    $wishlist = $wpdb->get_results($wpdb->prepare("SELECT post_title,post_date,guid from wp_posts where id =%d", $id));
+    if (empty($wishlist[0])) {
+        return [];
+    }
+    $title = $wishlist[0]->post_title;
+    $date = $wishlist[0]->post_date;
+    $url = $wishlist[0]->guid;
+    foreach ($items as $item) {
+        $prod = $WC->get_product($item['product_id']);
+        $image = $wpdb->get_var($wpdb->prepare("SELECT guid from wp_posts where id=%d", $prod->get_image_id()));
+        $producto = array("id" => $item['product_id'],
+            "quantity" => $item['quantity'],
+            "price" => $item['wl_price'],
+            "name" => $prod->get_name(),
+            "image" => $image);
+        //$producto->get
+        $productos[] = $producto;
+    }
+    $lista = array("id" => $id, "title" => $title, "date" => $date, "url" => $url, "products" => $productos);
+    return $lista;
+}
+
+/**
+ * Crea una nueva lista 
+ * @param type $request
+ * 	{
+  "title" : "Lista creada por rest",
+  "sharing":"Public",
+  "description":"descripcion",
+  "first_name":"Maria",
+  "last_name":"Lopez",
+  "email":"marrelopz@gmail.com"
+  }
+ * @return id
+ * 
+ */
+function wp_set_lista($request) {
+
+    $data = $request->get_json_params();
+    $raw_args['wishlist_title'] = (!empty($data['title'])) ? $data['title'] : "";
+    $raw_args['wishlist_description'] = (!empty($data['descripttion'])) ? $data['description'] : "";
+    $raw_args['wishlist_sharing'] = (!empty($data['sharing'])) ? $data['sharing'] : "";
+    $raw_args['wishlist_title'] = (!empty($data['title'])) ? $data['title'] : "";
+    $raw_args['wishlist_email'] = (!empty($data['email'])) ? $data['email'] : "";
+    $raw_args['wishlist_first_name'] = (!empty($data['first_name'])) ? $data['first_name'] : "";
+    $raw_args['wishlist_last_name'] = (!empty($data['last_name'])) ? $data['last_name'] : "";
+
+    $args = array();
+    foreach ($raw_args as $key => $value) {
+        $args[$key] = sanitize_text_field($value);
+    }
+
+    $current_user = wp_get_current_user();
+
+    $defaults = array(
+        'wishlist_title' => 'Lista',
+        'wishlist_description' => '',
+        'wishlist_type' => 'list',
+        'wishlist_sharing' => 'Private',
+        'wishlist_status' => 'active',
+        'wishlist_owner' => get_user(),
+        'wishlist_owner_email' => is_user_logged_in() ? $current_user->user_email : '',
+        'wishlist_owner_notifications' => false,
+        'wishlist_first_name' => is_user_logged_in() ? $current_user->user_firstname : '',
+        'wishlist_last_name' => is_user_logged_in() ? $current_user->user_lastname : '',
+        'wishlist_items' => array(),
+        'wishlist_subscribers' => array(is_user_logged_in() ? $current_user->user_email : ''),
+    );
+
+    $args = wp_parse_args($args, $defaults);
+
+    $args = apply_filters('wc_wishlists_create_list_args', $args);
+
+    $wishlist_data = array(
+        'post_type' => 'wishlist',
+        'post_title' => $args['wishlist_title'] ? $args['wishlist_title'] : sprintf(__('New List %s', 'wc_wishlist'), date('Y-m-d h:i:s')),
+        'post_content' => $args['wishlist_description'],
+        'post_status' => 'publish',
+        'ping_status' => 'closed',
+        'post_excerpt' => '',
+        'post_author' => is_int($args['wishlist_owner']) ? $args['wishlist_owner'] : 1
+    );
+
+    $wishlist_id = wp_insert_post($wishlist_data);
+    if (!$wishlist_id || is_wp_error($wishlist_id)) {
+
+        if (is_wp_error($wishlist_id)) {
+            WC_Wishlists_Messages::add_wp_error($wishlist_id);
+        }
+
+        WC_Wishlists_Messages::add_error(WC_Wishlists_Messages::get_text('error_creating_list'));
+
+        return false;
+    } elseif ($wishlist_id && $wishlist_id > 0) {
+
+        update_post_meta($wishlist_id, '_wishlist_status', $args['wishlist_status']);
+        update_post_meta($wishlist_id, '_wishlist_sharing', $args['wishlist_sharing']);
+        update_post_meta($wishlist_id, '_wishlist_type', $args['wishlist_type']);
+
+        update_post_meta($wishlist_id, '_wishlist_owner', $args['wishlist_owner']);
+        update_post_meta($wishlist_id, '_wishlist_email', $args['wishlist_email']);
+        update_post_meta($wishlist_id, '_wishlist_owner_notifications', $args['wishlist_owner_notifications']);
+
+        update_post_meta($wishlist_id, '_wishlist_first_name', $args['wishlist_first_name']);
+        update_post_meta($wishlist_id, '_wishlist_last_name', $args['wishlist_last_name']);
+
+        update_post_meta($wishlist_id, '_wishlist_subscribers', apply_filters('wc_wishlists_default_subscribers', $args['wishlist_subscribers'], $wishlist_id));
+        update_post_meta($wishlist_id, '_wishlist_items', apply_filters('wc_wishlists_default_items', $args['wishlist_items'], $wishlist_id));
+
+        update_post_meta($wishlist_id, '_wishlist_sharing_key', uniqid(md5(date('Y-m-d h:i:s'))));
+
+        do_action('wc_wishlists_created', $wishlist_id, $args);
+
+        return $wishlist_id;
+    }
+}
+
+/**
+ * edita lista del usuario
+ * @param type $request
+ * 	{
+		"wishlist_id":402,
+		"products":[
+			{
+				"id":116,
+				"quantity":3
+			},
+			{
+				"id":195,
+				"quantity":2
+			}
+		]
+	}
+ * @return true
+ */
+function wp_edit_lista($request) {
+    $data = $request->get_json_params();
+    if (empty($data['id'])) {
+        return new WP_Error(
+                'error_updating_wishlist', 'Error actualizando la lista asegurate de seleccionar una lista', array('status' => 403)
+        );
+    }
+    // $product_id=$data['product_id'];
+    $wishlist_id = $data['id'];
+    $was_added_to_cart = false;
+    $added_to_cart = array();
+    $updated_info =false;
+    if (!empty($data['title'])) {
+        $my_post = array(
+            'ID' => $wishlist_id,
+            'post_title' => $data['title']
+        );
+        wp_update_post($my_post);
+        $updated_info=true;
+    }
+    if (!empty($data['description'])) {
+        $my_post = array(
+            'ID' => $wishlist_id,
+            'post_content' => $data['description'],
+        );
+        wp_update_post($my_post);
+        $updated_info=true;
+    }
+    if (!empty($data['first_name'])) {
+        update_post_meta($wishlist_id, '_wishlist_first_name', $empty_items);
+        $updated_info=true;
+    }
+    if (!empty($data['last_name'])) {
+        update_post_meta($wishlist_id, '_wishlist_last_name', $empty_items);
+        $updated_info=true;
+    }
+    if (!empty($data['email'])) {
+        update_post_meta($wishlist_id, '_wishlist_email', $data['email']);
+        $updated_info=true;
+    }
+    if($updated_info){
+        
+    }
+    if (!empty($data['products']) && is_array($data['products'])) {
+        $quantity_set = false;
+
+        $items_to_add = array();
+        foreach ($data['products'] as $product) {
+            $quantity =(!empty($product['quantity']))?$product['quantity']:0;
+            $item =$product['id'];
+            if ($quantity <= 0) {
+                continue;
+            }
+            $quantity_set = true;
+
+            //Add to cart validation
+            $passed_validation = apply_filters('woocommerce_add_to_wishlist_validation', apply_filters('woocommerce_add_to_cart_validation', true, $item, $quantity), $item, $quantity);
+
+            if ($passed_validation) {
+                $items_to_add[] = array(
+                    'product_id' => $item,
+                    'quantity' => $quantity
+                );
+            }
+        }
+
+        $was_added_to_cart = true;
+        if (!empty($items_to_add) && count($items_to_add) == count($data['products'])) {
+            $empty_items = "a:0:{}";
+            update_post_meta($wishlist_id, '_wishlist_items', $empty_items);
+            foreach ($items_to_add as $item_to_add) {
+                if (WC_Wishlists_Wishlist_Item_Collection::add_item($wishlist_id, $item_to_add['product_id'], $item_to_add['quantity'])) {
+                    $was_added_to_cart = $was_added_to_cart & true;
+                } else {
+                    $was_added_to_cart = false;
+                }
+            }
+        } else {
+            $quantity_set = false;
+            $was_added_to_cart = false;
+        }
+
+
+        if (!$was_added_to_cart && !$quantity_set) {
+            return new WP_Error(
+                    'error_updating_wishlist', 'Ingrese la cantidad de productos a agregar', array('status' => 403)
+            );
+        } elseif (!$was_added_to_cart) {
+            return new WP_Error(
+                    'error_updating_wishlist', 'Ocurrio un problema agregando los productos a la lista, intente de nuevo', array('status' => 403)
+            );
+        } elseif ($was_added_to_cart) {
+            return true;
+        }
+    } elseif ($product_id) {
+        /* Link on product archives */
+        return new WP_Error(
+                'error_updating_wishlist', 'Seleccione un producto a agregar', array('status' => 403)
+        );
+    }
+
+    return false;
+}
+
+/**
+ * elimina lista del usuario
+ * @param type $request
+ * @return bool 
+ */
+function wp_delete_lista($request) {
+    global $wpdb;
+    $user = get_user();
+    $id = filter_var($request['id'], FILTER_SANITIZE_NUMBER_INT);
+    $lista = $wpdb->get_var($wpdb->prepare("SELECT meta_value from wp_postmeta where post_id= %d and meta_key ='_wishlist_owner'", $id));
+    if ($lista == $user) {
+        $wpdb->query('START TRANSACTION');
+        $wpdb->delete("{$wpdb->prefix}postmeta", array('post_id' => $id));
+        $wpdb->delete("{$wpdb->prefix}posts", array('id' => $id));
+        $wpdb->query('COMMIT');
+        return true;
+    }
+    return false;
+}
+
+/**
+ * devuelve los productos dentro del carrito y la cantidad
+ */
+function wp_get_cart(){
+    global $wpdb;
+    $customer_id = get_user();
+    $cart = $wpdb->get_var(
+            "select meta_value from wp_usermeta where user_id ={$customer_id} and meta_key = '_woocommerce_persistent_cart_1'"
+    );
+
+    $cart = unserialize($cart);
+    $_pf = new WC_Product_Factory();
+    $IDs = [];
+    $count=[];
+    // print_r($cart['cart']);
+    foreach ($cart['cart'] as $product) {
+        $IDS[] = $product['product_id'];
+        $count[] = $product['quantity'];
+    }
+    $products = []; 
+    $i=0;
+    foreach ($IDS as $id) {
+
+        $product = $_pf->get_product($id);
+        $producto = array("id" => $id,
+            "name" => $product->get_name(),
+            "description" => $product->get_description(),
+            "price" => $product->get_price(),
+            "quantity"=>$count[$i],
+            "subtotal"=>$count[$i] * $product->get_price());
+        $products[] = $producto;
+        $i++;
+    }
+    return array("cart" => $products);
+}
+
+/**
+ * elimina los productos del carrito
+ */
+function wp_clear_cart() {
+    
+}
+
+/**
+ * Agrega un nuevo producto al carrito de compras
+ * @param type $request
+ */
+function wp_add_cart($request) {
+    
+}
+
+/**
+ * Edita los productos del carrito de compras
+ * @param type $request
+ */
+function wp_edit_cart($request) {
+    global $wpdb;
+    $user = get_user();
+    $data = $data->get_json_params();
+}
+
+/**
+ * Eliminalos productos del carrito de compras
+ * @param type $request
+ */
+function wp_delete_cart_product($request) {
+    
+}
+
+/**
+ *  Crea un nuevo usuario
+ * @param type $request
+ */
+function wp_new_user($request) {
+    $data = $request->get_json_params();
+
+    try {
+        $username = !empty($data['username'])? : "";
+        $password = !empty($data['password'])? : "";
+        //$email=!empty($data['email'])?:"";
+        $email = null;
+        return wp_create_user($username, $password);
+    } catch (Exception $ex) {
+        return new WP_Error(
+                'error_creating_user', 'Error creando usuario, verifique la información ingresada', array('status' => 403)
+        );
+    }
+}
+
+function wp_set_user($request) {
+    if (!session_id()) {
+        session_start();
+    }
+    $data = $request->get_json_params();
+    $_SESSION['user'] = $data['user'];
+}
+
+function wp_get_user() {
+    if (!session_id()) {
+        session_start();
+    }
+    return $_SESSION['user'];
+}
+
+function get_user() {
+	$auth = isset($_SERVER['HTTP_AUTHORIZATION']) ?  $_SERVER['HTTP_AUTHORIZATION'] : false;
+    list($token) = sscanf($auth, 'Bearer %s');
+    $secret_key = defined('JWT_AUTH_SECRET_KEY') ? JWT_AUTH_SECRET_KEY : false;
+    $token = \Firebase\JWT\JWT::decode($token, $secret_key, array('HS256'));
+	return $token->data->user->id;
+}
+
+function newCartProduct($id, $quantity = 1) {
+    $key = getProductKey();
+    $price = $wpdb->get_var($wpdb->prepare("SELECT meta_value from wp_postmeta where post_id=%d and meta_key ='_regular_price'", $id));
+    $subtotal = $price * $quantity;
+    $product = array($key => [
+            "key" => $key,
+            "product_id" => $id,
+            "variation_id" => 0,
+            "variation" => [],
+            "quantity" => $quantity,
+            "line_tax_data" => [ "subtotal" => [], "total" => []],
+            "line_sub_total" => $subtotal,
+            "line_sub_total_tax" => "0.00",
+            "line_total" => $subtotal,
+            "line_tax" => "0.00"
+    ]);
+    return $product;
+}
+
+function getProductKey($length = 32) {
+    $characters = '0123456789abcdefghijklmnopqrstuvwxyz';
+    $charactersLength = strlen($characters);
+    $randomString = '';
+    for ($i = 0; $i < $length; $i++) {
+        $randomString .= $characters[rand(0, $charactersLength - 1)];
+    }
+    return $randomString;
+}
